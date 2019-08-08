@@ -3,9 +3,12 @@
 
 #include <algorithm>
 #include <iterator>
+#include <functional>
 #include <map>
 #include <memory>
+#include <regex>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -35,63 +38,49 @@ std::string GetDeviceNameFromSerial(const std::string& serial) {
   return std::string("unknown");
 }
 
-template<class Body, class Allocator>
-http::response<http::string_body> CreateResponse(
-    const http::request<Body, http::basic_fields<Allocator>>& req,
-    http::status status, beast::string_view content, beast::string_view mimetype) {
-  http::response<http::string_body> res{status, req.version()};
+
+using ResponseType = http::response<http::string_body>;
+
+ResponseType CreateResponse(http::status status, beast::string_view content, beast::string_view mimetype) {
+  http::response<http::string_body> res{status, 11};
   res.set(http::field::server, BOOST_BEAST_VERSION_STRING);
   res.set(http::field::content_type, mimetype);
   res.set(http::field::access_control_allow_origin, "*");
-  res.keep_alive(req.keep_alive());
   res.body() = std::string(content);
   res.prepare_payload();
   return res;
 }
 
-template<class Body, class Allocator>
-http::response<http::string_body> CreateBadRequestResponse(
-    const http::request<Body, http::basic_fields<Allocator>>& req,
-    beast::string_view why) {
-  return CreateResponse(req, http::status::bad_request, why, "text/html");
+ResponseType CreateBadRequestResponse(beast::string_view why) {
+  return CreateResponse(http::status::bad_request, why, "text/html");
 }
 
-template<class Body, class Allocator>
-http::response<http::string_body> CreateNotFoundResponse(
-    const http::request<Body, http::basic_fields<Allocator>>& req,
-    beast::string_view target) {
+ResponseType CreateNotFoundResponse(beast::string_view target) {
   std::string body = "The resource '" + std::string(target) + "' was not found.";
-  return CreateResponse(req, http::status::not_found, body, "text/html");
+  return CreateResponse(http::status::not_found, body, "text/html");
 }
 
-template<class Body, class Allocator>
-http::response<http::string_body> CreateServerErrorResponse(
-    const http::request<Body, http::basic_fields<Allocator>>& req,
-    beast::string_view what) {
+ResponseType CreateServerErrorResponse(beast::string_view what) {
   std::string body = "An error occurred: '" + std::string(what) + "'";
-  return CreateResponse(req, http::status::internal_server_error, body, "text/html");
+  return CreateResponse(http::status::internal_server_error, body, "text/html");
 }
 
-template<class Body, class Allocator>
-http::response<http::string_body> CreateHttpOkResponse(
-    const http::request<Body, http::basic_fields<Allocator>>& req,
-    beast::string_view body, beast::string_view mimetype) {
-  return CreateResponse(req, http::status::ok, body, mimetype);
+ResponseType CreateHttpOkResponse(beast::string_view body, beast::string_view mimetype) {
+  return CreateResponse(http::status::ok, body, mimetype);
 }
 
+using std::placeholders::_1;
+using std::placeholders::_2;
+using std::placeholders::_3;
 
 class ApiHandler {
  public:
   ApiHandler(DeviceManager* device_manager, DeviceRequestProcessor* processor)
-    : known_commands_({
-          {"statistic", http::verb::get},
-          {"list", http::verb::get},
-          {"dmesg", http::verb::put},
-          {"logcat", http::verb::put},
-          {"restart", http::verb::put},
-          {"applist", http::verb::get},
-          {"appinstall", http::verb::post},
-          {"appuninstall", http::verb::post}
+    : known_entries_({
+          ApiEntry(std::regex("/devices/statistic"), http::verb::get, std::bind(&ApiHandler::DevicesStatistic, this, _1, _2, _3)),
+          ApiEntry(std::regex("/devices/list"), http::verb::get, std::bind(&ApiHandler::ListDevices, this, _1, _2, _3)),
+          ApiEntry(std::regex("/devices/(\\w+)/logs/(\\w+)"), http::verb::get, std::bind(&ApiHandler::HandleDeviceCommand, this, _1, _2, _3)),
+          ApiEntry(std::regex("/devices/(\\w+)/(\\w+)"), http::verb::post, std::bind(&ApiHandler::HandleDeviceCommand, this, _1, _2, _3))
       }),
       device_manager_(device_manager),
       device_processor_(processor) {}
@@ -102,100 +91,41 @@ class ApiHandler {
       Send&& send) {
     std::string target = std::string(req.target());
     boost::algorithm::trim_if(target, boost::is_any_of("/"));
-    std::vector<std::string> parts;
-    boost::algorithm::split(parts, target, boost::is_any_of("/"));
 
-    if (parts.empty() || parts.front() != "devices") {
-      send(CreateBadRequestResponse(req, "invalid prefix"));
-      return;
-    }
+    auto send_response = [req, send](ResponseType&& res) {
+      res.version(req.version());
+      res.keep_alive(req.keep_alive());
+      send(std::move(res));
+    };
 
-    auto command_iter = known_commands_.find(parts.back());
-    if (command_iter == known_commands_.end()) {
-      send(CreateBadRequestResponse(req, "unknown command"));
-      return;
-    }
-
-    if (req.method() != command_iter->second) {
-      send(CreateBadRequestResponse(req, "unsupported method"));
-      return;
-    }
-
-    // /devices/statistic
-    if (parts.back() == "statistic") {
-      if (parts.size() != 2) {    // [devices, statistic]
-        send(CreateBadRequestResponse(req, "invalid argument"));
+    for (auto& ep : known_entries_) {
+      std::regex ep_regex;
+      http::verb method;
+      Handler handler;
+      std::tie(ep_regex, method, handler) = ep;
+      std::smatch sm;
+      if (std::regex_match(target, sm, ep_regex) && req.method() == method) {
+        MatchedGroups args;
+        if (sm.size() > 1) {
+          args.resize(sm.size() - 1);
+          std::transform(++sm.begin(), sm.end(), args.begin(), [](std::smatch::const_reference m) { return m.str(); });
+        }
+        handler(std::move(args), req.body(), send_response);
         return;
       }
-
-      DevicesStatistic(req, send);
-      return;
     }
 
-    // /devices/list
-    if (parts.back() == "list") {
-      if (parts.size() != 2) {    // [devices, list]
-        send(CreateBadRequestResponse(req, "invalid argument"));
-        return;
-      }
-
-      ListDevices(req, send);
-      return;
-    }
-
-    // following API endpoints consist of 3 parts: /devices/<serian number>/<command>
-    if (parts.size() != 3) {
-      send(CreateBadRequestResponse(req, "invalid argument"));
-      return;
-    }
-
-    const std::string& device_serial = parts[1];
-    IConnection* device_connection = device_manager_->GetConnection(device_serial);
-    if (!device_connection) {
-      send(CreateNotFoundResponse(req, device_serial));
-      return;
-    }
-
-    // /devices/<SN>/dmesg
-    if (parts.back() == "dmesg") {
-      DownloadDmesgLog(req, device_connection, device_serial, send);
-      return;
-    }
-
-    // /devices/<SN>/logcat
-    if (parts.back() == "logcat") {
-      DownloadLogcatLog(req, device_connection, device_serial, send);
-      return;
-    }
-
-    // /devices/<SN>/restart
-    if (parts.back() == "restart") {
-      RestartDevice(req, device_connection, send);
-      return;
-    }
-
-    // /devices/<SN>/applist
-    if (parts.back() == "applist") {
-      ListInstalledPackages(req, device_connection, send);
-      return;
-    }
-
-    // /devices/<SN>/appinstall
-    if (parts.back() == "appinstall") {
-      InstallPackage(req, device_connection, send);
-      return;
-    }
-
-    // /devices/<SN>/appuninstall
-    if (parts.back() == "appuninstall") {
-      UninstallPackage(req, device_connection, send);
-      return;
-    }
+    send_response(CreateBadRequestResponse("invalid request: bad endpoint or method"));
   }
 
  private:
-  template<class Body, class Allocator, class Send>
-  void DevicesStatistic(const http::request<Body, http::basic_fields<Allocator>>& req, Send& send) {
+  using CallbackType = std::function<void(ResponseType&&)>;
+  using MatchedGroups = std::vector<std::string>;
+
+  void DevicesStatistic(MatchedGroups&& args, const std::string& content, CallbackType&& callback) {
+    boost::ignore_unused(args);
+    boost::ignore_unused(content);
+
     std::map<std::uint64_t, std::shared_ptr<IDeviceInfo> > devices;
     device_manager_->ListDevices(devices);
 
@@ -221,11 +151,13 @@ class ApiHandler {
     json["citiesCount"] = cities.size();
     json["countriesCount"] = countries.size();
 
-    send(CreateHttpOkResponse(req, json.dump(), "application/json"));
+    callback(CreateHttpOkResponse(json.dump(), "application/json"));
   }
 
-  template<class Body, class Allocator, class Send>
-  void ListDevices(const http::request<Body, http::basic_fields<Allocator>>& req, Send& send) {
+  void ListDevices(MatchedGroups&& args, const std::string& content, CallbackType&& callback) {
+    boost::ignore_unused(args);
+    boost::ignore_unused(content);
+
     std::map<std::uint64_t, std::shared_ptr<IDeviceInfo> > devices;
     device_manager_->ListDevices(devices);
 
@@ -256,118 +188,151 @@ class ApiHandler {
       json.push_back(device_node);
     }
 
-    send(CreateHttpOkResponse(req, json.dump(), "application/json"));
+    callback(CreateHttpOkResponse(json.dump(), "application/json"));
   }
 
-  template<class Body, class Allocator, class Send>
-  void DownloadDmesgLog(
-      const http::request<Body, http::basic_fields<Allocator>>& req,
-      IConnection* device_connection, const std::string& serial, Send& send) {
-    DownloadLog(req, device_connection,
+  void HandleDeviceCommand(MatchedGroups&& args, const std::string& content, CallbackType&& callback) {
+    assert(args.size() == 2);
+    const std::string& device_serial = args[0];
+    const std::string& device_command = args[1];
+
+    IConnection* device_connection = device_manager_->GetConnection(device_serial);
+    if (!device_connection) {
+      callback(CreateNotFoundResponse(device_serial));
+      return;
+    }
+
+    // /devices/<SN>/logs/dmesg
+    if (device_command == "dmesg") {
+      DownloadDmesgLog(device_connection, device_serial, std::move(callback));
+      return;
+    }
+
+    // /devices/<SN>/logs/logcat
+    if (device_command == "logcat") {
+      DownloadLogcatLog(device_connection, device_serial, std::move(callback));
+      return;
+    }
+
+    // /devices/<SN>/restart
+    if (device_command == "restart") {
+      RestartDevice(device_connection, std::move(callback));
+      return;
+    }
+
+    // /devices/<SN>/applist
+    if (device_command == "applist") {
+      ListInstalledPackages(device_connection, std::move(callback));
+      return;
+    }
+
+    // /devices/<SN>/appinstall
+    if (device_command == "appinstall") {
+      InstallPackage(device_connection, content, std::move(callback));
+      return;
+    }
+
+    // /devices/<SN>/appuninstall
+    if (device_command == "appuninstall") {
+      UninstallPackage(device_connection, content, std::move(callback));
+      return;
+    }
+  }
+
+  void DownloadDmesgLog(IConnection* device_connection,
+                        const std::string& serial,
+                        CallbackType&& callback) {
+    DownloadLog(device_connection,
                 std::make_shared<DmesgRequest>(),
                 DeviceRequestType::kDmesgReply,
-                serial + "-dmesg.log", send);
+                serial + "-dmesg.log", std::move(callback));
   }
 
-  template<class Body, class Allocator, class Send>
-  void DownloadLogcatLog(
-      const http::request<Body, http::basic_fields<Allocator>>& req,
-      IConnection* device_connection, const std::string& serial, Send& send) {
-    DownloadLog(req, device_connection,
+  void DownloadLogcatLog(IConnection* device_connection,
+                         const std::string& serial,
+                         CallbackType&& callback) {
+    DownloadLog(device_connection,
                 std::make_shared<LogcatRequest>(),
                 DeviceRequestType::kLogcatReply,
-                serial + "-logcat.log", send);
+                serial + "-logcat.log", std::move(callback));
   }
 
-  template<class Body, class Allocator, class Send>
-  void RestartDevice(
-      const http::request<Body, http::basic_fields<Allocator>>& req,
-      IConnection* device_connection, Send& send) {
+  void RestartDevice(IConnection* device_connection, CallbackType&& callback) {
     SendDeviceCommand(
         device_connection, std::make_shared<RebootRequest>(),
         DeviceRequestType::kRebootReply,
-        [send, req](IncomingDataPtr) {
-          http::response<http::empty_body> res{http::status::ok, req.version()};
-          res.set(http::field::server, BOOST_BEAST_VERSION_STRING);
-          res.keep_alive(req.keep_alive());
-          send(std::move(res));
+        [callback](IncomingDataPtr) {
+          callback(CreateHttpOkResponse("Success", "text/plain"));
         });
   }
 
-  template<class Body, class Allocator, class Send>
-  void ListInstalledPackages(
-      const http::request<Body, http::basic_fields<Allocator>>& req,
-      IConnection* device_connection, Send& send) {
+  void ListInstalledPackages(IConnection* device_connection, CallbackType&& callback) {
     SendDeviceCommand(
         device_connection, std::make_shared<ListInstalledPackagesRequest>(),
         DeviceRequestType::kListInstalledPackagesReply,
-        [send, req](IncomingDataPtr reply) {
+        [callback](IncomingDataPtr reply) {
           auto list_packages_reply = std::static_pointer_cast<ListInstalledPackagesReply>(reply);
           if (list_packages_reply->GetLastError()) {
-            send(CreateServerErrorResponse(req, list_packages_reply->GetLastError().message()));
+            callback(CreateServerErrorResponse(list_packages_reply->GetLastError().message()));
           } else {
             const auto& packages = list_packages_reply->GetPackagesList();
             nlohmann::json json = nlohmann::json::array();
             std::copy(packages.begin(), packages.end(), std::back_inserter(json));
-            send(CreateHttpOkResponse(req, json.dump(), "application/json"));
+            callback(CreateHttpOkResponse(json.dump(), "application/json"));
           }
         });
   }
 
-  template<class Body, class Allocator, class Send>
-  void InstallPackage(
-      const http::request<Body, http::basic_fields<Allocator>>& req,
-      IConnection* device_connection, Send& send) {
-    SendSimpleDeviceCommand(req, device_connection,
-                            std::make_shared<InstallPackageRequest>(req.body()),
-                            DeviceRequestType::kInstallPackageReply, send);
+  void InstallPackage(IConnection* device_connection,
+                      const std::string& content,
+                      CallbackType&& callback) {
+    SendSimpleDeviceCommand(
+        device_connection,
+        std::make_shared<InstallPackageRequest>(content),
+        DeviceRequestType::kInstallPackageReply, std::move(callback));
   }
 
-  template<class Body, class Allocator, class Send>
-  void UninstallPackage(
-      const http::request<Body, http::basic_fields<Allocator>>& req,
-      IConnection* device_connection, Send& send) {
-    SendSimpleDeviceCommand(req, device_connection,
-                            std::make_shared<UninstallPackageRequest>(req.body()),
-                            DeviceRequestType::kUninstallPackageReply, send);
+  void UninstallPackage(IConnection* device_connection,
+                        const std::string& content,
+                        CallbackType&& callback) {
+    SendSimpleDeviceCommand(
+        device_connection,
+        std::make_shared<UninstallPackageRequest>(content),
+        DeviceRequestType::kUninstallPackageReply, std::move(callback));
   }
 
-  template<class Body, class Allocator, class Send>
   void SendSimpleDeviceCommand(
-      const http::request<Body, http::basic_fields<Allocator>>& req,
       IConnection* device_connection, OutgoingDataPtr command_request,
-      DeviceRequestType expected_reply_type, Send& send) {
+      DeviceRequestType expected_reply_type, CallbackType&& callback) {
     SendDeviceCommand(
         device_connection, command_request,
         expected_reply_type,
-        [send, req](IncomingDataPtr reply) {
+        [callback](IncomingDataPtr reply) {
           auto base_reply = std::static_pointer_cast<ReplyBase>(reply);
           if (base_reply->GetLastError()) {
-            send(CreateServerErrorResponse(req, base_reply->GetLastError().message()));
+            callback(CreateServerErrorResponse(base_reply->GetLastError().message()));
           } else {
-            send(CreateHttpOkResponse(req, base_reply->GetRawPayload(), "text/plain"));
+            callback(CreateHttpOkResponse(base_reply->GetRawPayload(), "text/plain"));
           }
         });
   }
 
-  template<class Body, class Allocator, class Send>
   void DownloadLog(
-      const http::request<Body, http::basic_fields<Allocator>>& req,
       IConnection* device_connection, OutgoingDataPtr command_request,
       DeviceRequestType expected_reply_type, const std::string& filename,
-      Send& send) {
+      CallbackType&& callback) {
     SendDeviceCommand(
         device_connection, command_request,
         expected_reply_type,
-        [send, req, filename](IncomingDataPtr reply) {
+        [callback, filename](IncomingDataPtr reply) {
           auto base_reply = std::static_pointer_cast<ReplyBase>(reply);
           if (base_reply->GetLastError()) {
-            send(CreateServerErrorResponse(req, base_reply->GetLastError().message()));
+            callback(CreateServerErrorResponse(base_reply->GetLastError().message()));
           } else {
-            auto res = CreateHttpOkResponse(req, base_reply->GetRawPayload(), "text/plain");
+            auto res = CreateHttpOkResponse(base_reply->GetRawPayload(), "text/plain");
             res.set(http::field::server, BOOST_BEAST_VERSION_STRING);
             res.set(http::field::content_disposition, "attachment; filename=" + filename);
-            send(std::move(res));
+            callback(std::move(res));
           }
         });
   }
@@ -381,7 +346,11 @@ class ApiHandler {
     device_connection->Write(command_request);
   }
 
-  const std::unordered_map<std::string, http::verb> known_commands_;
+  using Handler = std::function<void(MatchedGroups&&, const std::string&, CallbackType&&)>;
+  using ApiEntry = std::tuple<std::regex, http::verb, Handler>;
+
+  std::vector<ApiEntry> known_entries_;
+
   DeviceManager* device_manager_;
   DeviceRequestProcessor* device_processor_;
 };
