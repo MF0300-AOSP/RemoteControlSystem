@@ -1,0 +1,27 @@
+# shell domain is used for remote control service just because it is one
+# of system-defined domains with very powerful permissions. first of all
+# this domain is one who allowed to run java-based apps with bash script
+# wrappers (like pm utility) and any other command line utilities.
+# such stuff is vital for remote control service, and it is pretty safe
+# to re-use this system domain for other purpose, because shell domain
+# is used only for local (developer) shell logins. moreover, remote
+# control system must provide similar functionality like local shell.
+
+# allow remote control service to use net_raw capability
+# this looks slightly strange, but this is vital for network communication
+# it is very possible this is required by Boost.Asio internal implementation
+# Note: system SELinux rules modification required to allow this!
+# see private/app.te, neverallow { appdomain -bluetooth } self:capability *;
+allow shell self:capability net_raw;
+
+# allow remote control service to communicate with sernd daemon
+use_serialnumberservice(shell)
+# allow remote control service to read dmesg log
+allow shell kmsg_device:chr_file r_file_perms;
+
+# allow remote control service transition to su domain
+# unfortunately, package installation using pm util requires a lot of
+# permissions (and even impossible without root user), the easist way
+# is grant su domain permissions (fortunately shell domain allows this)
+allow shell self:process setcurrent;
+allow shell su:process dyntransition;
