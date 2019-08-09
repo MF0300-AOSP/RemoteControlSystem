@@ -122,7 +122,8 @@ class ListInstalledPackagesReply final : public SimpleReply<DeviceRequestType::k
  public:
   using SimpleReply::SimpleReply;
 
-  const std::list<std::string>& GetPackagesList() const { return packages_; }
+  using AppsListType = std::list<std::string>;
+  const AppsListType& GetPackagesList() const { return packages_; }
 
  protected:
   void ProcessPayload(const std::string& payload) override {
@@ -137,7 +138,7 @@ class ListInstalledPackagesReply final : public SimpleReply<DeviceRequestType::k
   }
 
  private:
-  std::list<std::string> packages_;
+  AppsListType packages_;
 };
 
 

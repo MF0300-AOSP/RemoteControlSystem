@@ -2,7 +2,6 @@
 #define WEB_API_HANDLER_H
 
 #include <algorithm>
-#include <iterator>
 #include <functional>
 #include <map>
 #include <memory>
@@ -38,6 +37,36 @@ std::string GetDeviceNameFromSerial(const std::string& serial) {
   return std::string("unknown");
 }
 
+nlohmann::json FormatDeviceInfo(const IDeviceInfo& device_info) {
+  nlohmann::json device_node;
+  device_node["sn"] = device_info.GetSerialNumber();
+  device_node["deviceName"] = GetDeviceNameFromSerial(device_info.GetSerialNumber());
+  device_node["osVersion"] = device_info.GetAndroidVersion();
+  device_node["buildNumber"] = device_info.GetBuildNumber();
+  device_node["status"] = static_cast<int>(device_info.GetStatus());
+
+  if (auto location = device_info.GetLocation()) {
+    device_node["city"] = location->city();
+    device_node["country"] = location->country();
+
+    nlohmann::json location_node;
+    location_node["lat"] = location->latitude();
+    location_node["lng"] = location->longitude();
+
+    device_node["location"] = location_node;
+  }
+  return device_node;
+}
+
+nlohmann::json FormatAppsList(const ListInstalledPackagesReply::AppsListType& apps_list) {
+  nlohmann::json apps_list_node;
+  for (auto& app : apps_list) {
+    nlohmann::json app_node;
+    app_node["buildName"] = app;
+    apps_list_node.emplace_back(app_node);
+  }
+  return apps_list_node;
+}
 
 using ResponseType = http::response<http::string_body>;
 
@@ -79,6 +108,7 @@ class ApiHandler {
     : known_entries_({
           ApiEntry(std::regex("/devices/statistic"), http::verb::get, std::bind(&ApiHandler::DevicesStatistic, this, _1, _2, _3)),
           ApiEntry(std::regex("/devices/list"), http::verb::get, std::bind(&ApiHandler::ListDevices, this, _1, _2, _3)),
+          ApiEntry(std::regex("/devices/(\\w+)"), http::verb::get, std::bind(&ApiHandler::DeviceInfo, this, _1, _2, _3)),
           ApiEntry(std::regex("/devices/(\\w+)/logs/(\\w+)"), http::verb::get, std::bind(&ApiHandler::HandleDeviceCommand, this, _1, _2, _3)),
           ApiEntry(std::regex("/devices/(\\w+)/(\\w+)"), http::verb::post, std::bind(&ApiHandler::HandleDeviceCommand, this, _1, _2, _3))
       }),
@@ -167,28 +197,40 @@ class ApiHandler {
       const auto& device_info = iter->second;
       if (!device_info)
         continue;
-
-      nlohmann::json device_node;
-      device_node["sn"] = device_info->GetSerialNumber();
-      device_node["deviceName"] = GetDeviceNameFromSerial(device_info->GetSerialNumber());
-      device_node["osVersion"] = device_info->GetAndroidVersion();
-      device_node["buildNumber"] = device_info->GetBuildNumber();
-      device_node["status"] = static_cast<int>(device_info->GetStatus());
-
-      if (auto location = device_info->GetLocation()) {
-        device_node["city"] = location->city();
-        device_node["country"] = location->country();
-
-        nlohmann::json location_node;
-        location_node["lat"] = location->latitude();
-        location_node["lng"] = location->longitude();
-
-        device_node["location"] = location_node;
-      }
-      json.push_back(device_node);
+      json.emplace_back(FormatDeviceInfo(*device_info));
     }
 
     callback(CreateHttpOkResponse(json.dump(), "application/json"));
+  }
+
+  void DeviceInfo(MatchedGroups&& args, const std::string& content, CallbackType&& callback) {
+    boost::ignore_unused(content);
+
+    const std::string& device_serial = args[0];
+    if (auto device_info = device_manager_->GetDeviceInfo(device_serial)) {
+      nlohmann::json device_info_json = FormatDeviceInfo(*device_info);
+      if (device_info->GetStatus() == IDeviceInfo::DeviceStatus::kOnline) {
+        IConnection* device_connection = device_manager_->GetConnection(device_serial);
+        if (device_connection) {
+          ListInstalledPackages(device_connection, [device_info_json, callback](ResponseType&& response) {
+            if (response.result() != http::status::ok) {
+              callback(std::move(response));
+              return;
+            }
+
+            nlohmann::json full_json = device_info_json;
+            full_json["applications"] = nlohmann::json::parse(response.body());
+            callback(CreateHttpOkResponse(full_json.dump(), "application/json"));
+          });
+          return;
+        }
+      }
+      // device offline - no app list is returned
+      callback(CreateHttpOkResponse(device_info_json.dump(), "application/json"));
+      return;
+    }
+
+    callback(CreateNotFoundResponse(device_serial));
   }
 
   void HandleDeviceCommand(MatchedGroups&& args, const std::string& content, CallbackType&& callback) {
@@ -275,9 +317,7 @@ class ApiHandler {
           if (list_packages_reply->GetLastError()) {
             callback(CreateServerErrorResponse(list_packages_reply->GetLastError().message()));
           } else {
-            const auto& packages = list_packages_reply->GetPackagesList();
-            nlohmann::json json = nlohmann::json::array();
-            std::copy(packages.begin(), packages.end(), std::back_inserter(json));
+            nlohmann::json json = FormatAppsList(list_packages_reply->GetPackagesList());
             callback(CreateHttpOkResponse(json.dump(), "application/json"));
           }
         });

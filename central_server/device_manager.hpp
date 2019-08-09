@@ -96,6 +96,15 @@ class DeviceManager : public IConnectionTracker {
     }
   }
 
+  std::shared_ptr<IDeviceInfo> GetDeviceInfo(const std::string& serial) const {
+    for (auto iter = devices_.begin(); iter != devices_.end(); ++iter) {
+      if (iter->second->GetSerialNumber() == serial) {
+        return iter->second;
+      }
+    }
+    return nullptr;
+  }
+
   IConnection* GetConnection(const std::string& serial) const {
     for (auto iter = devices_.begin(); iter != devices_.end(); ++iter) {
       if (iter->second->GetSerialNumber() == serial) {
