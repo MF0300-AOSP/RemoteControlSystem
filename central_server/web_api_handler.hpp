@@ -109,8 +109,12 @@ class ApiHandler {
           ApiEntry(std::regex("/devices/statistic"), http::verb::get, std::bind(&ApiHandler::DevicesStatistic, this, _1, _2, _3)),
           ApiEntry(std::regex("/devices/list"), http::verb::get, std::bind(&ApiHandler::ListDevices, this, _1, _2, _3)),
           ApiEntry(std::regex("/devices/(\\w+)"), http::verb::get, std::bind(&ApiHandler::DeviceInfo, this, _1, _2, _3)),
-          ApiEntry(std::regex("/devices/(\\w+)/logs/(\\w+)"), http::verb::get, std::bind(&ApiHandler::HandleDeviceCommand, this, _1, _2, _3)),
-          ApiEntry(std::regex("/devices/(\\w+)/(\\w+)"), http::verb::post, std::bind(&ApiHandler::HandleDeviceCommand, this, _1, _2, _3))
+          ApiEntry(std::regex("/devices/(\\w+)/logs/dmesg"), http::verb::get, std::bind(&ApiHandler::DownloadDmesgLog, this, _1, _2, _3)),
+          ApiEntry(std::regex("/devices/(\\w+)/logs/logcat"), http::verb::get, std::bind(&ApiHandler::DownloadLogcatLog, this, _1, _2, _3)),
+          ApiEntry(std::regex("/devices/(\\w+)/restart"), http::verb::put, std::bind(&ApiHandler::RestartDevice, this, _1, _2, _3)),
+          ApiEntry(std::regex("/devices/(\\w+)/applist"), http::verb::get, std::bind(&ApiHandler::ListInstalledPackages, this, _1, _2, _3)),
+          ApiEntry(std::regex("/devices/(\\w+)/appinstall"), http::verb::post, std::bind(&ApiHandler::InstallPackage, this, _1, _2, _3)),
+          ApiEntry(std::regex("/devices/(\\w+)/appuninstall"), http::verb::post, std::bind(&ApiHandler::UninstallPackage, this, _1, _2, _3))
       }),
       device_manager_(device_manager),
       device_processor_(processor) {}
@@ -120,7 +124,7 @@ class ApiHandler {
       http::request<Body, http::basic_fields<Allocator>>&& req,
       Send&& send) {
     std::string target = std::string(req.target());
-    boost::algorithm::trim_if(target, boost::is_any_of("/"));
+    boost::algorithm::trim_right_if(target, boost::is_any_of("/"));
 
     auto send_response = [req, send](ResponseType&& res) {
       res.version(req.version());
@@ -212,7 +216,7 @@ class ApiHandler {
       if (device_info->GetStatus() == IDeviceInfo::DeviceStatus::kOnline) {
         IConnection* device_connection = device_manager_->GetConnection(device_serial);
         if (device_connection) {
-          ListInstalledPackages(device_connection, [device_info_json, callback](ResponseType&& response) {
+          CommandAppList(device_connection, [device_info_json, callback](ResponseType&& response) {
             if (response.result() != http::status::ok) {
               callback(std::move(response));
               return;
@@ -233,73 +237,78 @@ class ApiHandler {
     callback(CreateNotFoundResponse(device_serial));
   }
 
-  void HandleDeviceCommand(MatchedGroups&& args, const std::string& content, CallbackType&& callback) {
-    assert(args.size() == 2);
-    const std::string& device_serial = args[0];
-    const std::string& device_command = args[1];
-
-    IConnection* device_connection = device_manager_->GetConnection(device_serial);
-    if (!device_connection) {
-      callback(CreateNotFoundResponse(device_serial));
-      return;
-    }
-
-    // /devices/<SN>/logs/dmesg
-    if (device_command == "dmesg") {
-      DownloadDmesgLog(device_connection, device_serial, std::move(callback));
-      return;
-    }
-
-    // /devices/<SN>/logs/logcat
-    if (device_command == "logcat") {
-      DownloadLogcatLog(device_connection, device_serial, std::move(callback));
-      return;
-    }
-
-    // /devices/<SN>/restart
-    if (device_command == "restart") {
-      RestartDevice(device_connection, std::move(callback));
-      return;
-    }
-
-    // /devices/<SN>/applist
-    if (device_command == "applist") {
-      ListInstalledPackages(device_connection, std::move(callback));
-      return;
-    }
-
-    // /devices/<SN>/appinstall
-    if (device_command == "appinstall") {
-      InstallPackage(device_connection, content, std::move(callback));
-      return;
-    }
-
-    // /devices/<SN>/appuninstall
-    if (device_command == "appuninstall") {
-      UninstallPackage(device_connection, content, std::move(callback));
-      return;
-    }
+  void DownloadDmesgLog(MatchedGroups&& args, const std::string& content, CallbackType&& callback) {
+    HandleDeviceCommand(DeviceCommand::kDmesg, args[0], content, std::move(callback));
   }
 
-  void DownloadDmesgLog(IConnection* device_connection,
-                        const std::string& serial,
-                        CallbackType&& callback) {
+  void DownloadLogcatLog(MatchedGroups&& args, const std::string& content, CallbackType&& callback) {
+    HandleDeviceCommand(DeviceCommand::kLogcat, args[0], content, std::move(callback));
+  }
+
+  void RestartDevice(MatchedGroups&& args, const std::string& content, CallbackType&& callback) {
+    HandleDeviceCommand(DeviceCommand::kReboot, args[0], content, std::move(callback));
+  }
+
+  void ListInstalledPackages(MatchedGroups&& args, const std::string& content, CallbackType&& callback) {
+    HandleDeviceCommand(DeviceCommand::kListInstalledPackages, args[0], content, std::move(callback));
+  }
+
+  void InstallPackage(MatchedGroups&& args, const std::string& content, CallbackType&& callback) {
+    HandleDeviceCommand(DeviceCommand::kInstallPackage, args[0], content, std::move(callback));
+  }
+
+  void UninstallPackage(MatchedGroups&& args, const std::string& content, CallbackType&& callback) {
+    HandleDeviceCommand(DeviceCommand::kUninstallPackage, args[0], content, std::move(callback));
+  }
+
+  void HandleDeviceCommand(DeviceCommand command, const std::string& serial,
+                           const std::string& content, CallbackType&& callback) {
+
+    IConnection* device_connection = device_manager_->GetConnection(serial);
+    if (!device_connection) {
+      callback(CreateNotFoundResponse(serial));
+      return;
+    }
+
+    switch (command) {
+      case DeviceCommand::kDmesg:
+        CommandDmesg(device_connection, serial, std::move(callback));
+        return;
+      case DeviceCommand::kLogcat:
+        CommandLogcat(device_connection, serial, std::move(callback));
+        return;
+      case DeviceCommand::kReboot:
+        CommandRestart(device_connection, std::move(callback));
+        return;
+      case DeviceCommand::kListInstalledPackages:
+        CommandAppList(device_connection, std::move(callback));
+        return;
+      case DeviceCommand::kInstallPackage:
+        CommandAppInstall(device_connection, content, std::move(callback));
+        return;
+      case DeviceCommand::kUninstallPackage:
+        CommandAppUninstall(device_connection, content, std::move(callback));
+        return;
+    }
+
+    callback(CreateBadRequestResponse("unknown command"));
+  }
+
+  void CommandDmesg(IConnection* device_connection, const std::string& serial, CallbackType&& callback) {
     DownloadLog(device_connection,
                 std::make_shared<DmesgRequest>(),
                 DeviceRequestType::kDmesgReply,
                 serial + "-dmesg.log", std::move(callback));
   }
 
-  void DownloadLogcatLog(IConnection* device_connection,
-                         const std::string& serial,
-                         CallbackType&& callback) {
+  void CommandLogcat(IConnection* device_connection, const std::string& serial, CallbackType&& callback) {
     DownloadLog(device_connection,
                 std::make_shared<LogcatRequest>(),
                 DeviceRequestType::kLogcatReply,
                 serial + "-logcat.log", std::move(callback));
   }
 
-  void RestartDevice(IConnection* device_connection, CallbackType&& callback) {
+  void CommandRestart(IConnection* device_connection, CallbackType&& callback) {
     SendDeviceCommand(
         device_connection, std::make_shared<RebootRequest>(),
         DeviceRequestType::kRebootReply,
@@ -308,7 +317,7 @@ class ApiHandler {
         });
   }
 
-  void ListInstalledPackages(IConnection* device_connection, CallbackType&& callback) {
+  void CommandAppList(IConnection* device_connection, CallbackType&& callback) {
     SendDeviceCommand(
         device_connection, std::make_shared<ListInstalledPackagesRequest>(),
         DeviceRequestType::kListInstalledPackagesReply,
@@ -323,7 +332,7 @@ class ApiHandler {
         });
   }
 
-  void InstallPackage(IConnection* device_connection,
+  void CommandAppInstall(IConnection* device_connection,
                       const std::string& content,
                       CallbackType&& callback) {
     SendSimpleDeviceCommand(
@@ -332,7 +341,7 @@ class ApiHandler {
         DeviceRequestType::kInstallPackageReply, std::move(callback));
   }
 
-  void UninstallPackage(IConnection* device_connection,
+  void CommandAppUninstall(IConnection* device_connection,
                         const std::string& content,
                         CallbackType&& callback) {
     SendSimpleDeviceCommand(
@@ -370,7 +379,6 @@ class ApiHandler {
             callback(CreateServerErrorResponse(base_reply->GetLastError().message()));
           } else {
             auto res = CreateHttpOkResponse(base_reply->GetRawPayload(), "text/plain");
-            res.set(http::field::server, BOOST_BEAST_VERSION_STRING);
             res.set(http::field::content_disposition, "attachment; filename=" + filename);
             callback(std::move(res));
           }
