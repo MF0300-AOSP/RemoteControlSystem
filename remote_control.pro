@@ -2,4 +2,5 @@ TEMPLATE = subdirs
 
 SUBDIRS += \
     central_server \
-    device_client
+    device_client \
+    location_finder
