@@ -111,7 +111,7 @@ class ApiHandler {
           ApiEntry(std::regex("/devices/(\\w+)"), http::verb::get, std::bind(&ApiHandler::DeviceInfo, this, _1, _2, _3)),
           ApiEntry(std::regex("/devices/(\\w+)/logs/dmesg"), http::verb::get, std::bind(&ApiHandler::DownloadDmesgLog, this, _1, _2, _3)),
           ApiEntry(std::regex("/devices/(\\w+)/logs/logcat"), http::verb::get, std::bind(&ApiHandler::DownloadLogcatLog, this, _1, _2, _3)),
-          ApiEntry(std::regex("/devices/(\\w+)/restart"), http::verb::put, std::bind(&ApiHandler::RestartDevice, this, _1, _2, _3)),
+          ApiEntry(std::regex("/devices/(\\w+)/restart"), http::verb::get, std::bind(&ApiHandler::RestartDevice, this, _1, _2, _3)),
           ApiEntry(std::regex("/devices/(\\w+)/applist"), http::verb::get, std::bind(&ApiHandler::ListInstalledPackages, this, _1, _2, _3)),
           ApiEntry(std::regex("/devices/(\\w+)/appinstall"), http::verb::post, std::bind(&ApiHandler::InstallPackage, this, _1, _2, _3)),
           ApiEntry(std::regex("/devices/(\\w+)/appuninstall"), http::verb::post, std::bind(&ApiHandler::UninstallPackage, this, _1, _2, _3))
