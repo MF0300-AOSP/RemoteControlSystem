@@ -93,6 +93,21 @@ class DeviceClient {
   }
 
   void SendLocation() {
+    // IP based location pretty inaccurate, so try to get coordinates from Android services
+    std::regex ll_re(" *network: Location\\[network (-?\\d+\\.\\d+),(-?\\d+.\\d+).*");
+    std::smatch sm;
+
+    std::string output = exec("dumpsys location");
+    std::stringstream ss(output);
+    std::string line;
+    while (std::getline(ss, line)) {
+      if (std::regex_match(line, sm, ll_re)) {
+        assert(sm.size() >= 3);
+        location_ = DeviceLocation(std::stod(sm[1]), std::stod(sm[2]), location_.city(), location_.country());
+        break;
+      }
+    }
+
     connection_->Write(std::make_shared<UpdateLocationRequest>(location_));
   }
 
