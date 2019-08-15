@@ -235,6 +235,10 @@ class Connection : public IConnection, public std::enable_shared_from_this<Conne
   void ProcessRequest() {
     assert(request_factory_);
     IncomingDataPtr request = request_factory_->CreateRequest(incoming_header_);
+    if (!request) {
+      Close();
+      return;
+    }
     assert(request);
     auto sthis = this->shared_from_this();
     request->ReadPayload(
