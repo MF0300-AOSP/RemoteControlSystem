@@ -44,6 +44,9 @@ class DeviceClient {
   DeviceClient(boost::asio::io_context& io_context,
                std::string host, std::string port)
       : timer_(io_context),
+        io_context_(io_context),
+        host_(std::move(host)),
+        port_(std::move(port)),
         location_(
           []() -> DeviceLocation {
               std::string output = exec("location_finder");
@@ -63,13 +66,7 @@ class DeviceClient {
                                     json.get<std::string>("city", "Unknown"),
                                     csm[1]);
           }()) {
-    tcp::resolver resolver(io_context);
-    auto endpoints = resolver.resolve(host, port);
-
-    tcp::socket socket(io_context);
-    connection_ = std::make_shared<DeviceClientConnection>(std::move(socket), &request_factory_, &processor_);
-    connection_->Connect(endpoints);
-
+    Reconnect();
     StartTimer();
     SendLocation();
     SendSystemInfo();
@@ -81,12 +78,26 @@ class DeviceClient {
   }
 
  private:
+  void Reconnect() {
+    tcp::resolver resolver(io_context_);
+    auto endpoints = resolver.resolve(host_, port_);
+
+    tcp::socket socket(io_context_);
+    connection_ = std::make_shared<DeviceClientConnection>(std::move(socket), &request_factory_, &processor_);
+    connection_->Connect(endpoints);
+  }
+
   void StartTimer() {
     timer_.expires_after(std::chrono::seconds(30));
     timer_.async_wait(
         [this](boost::system::error_code error) {
           if (!error) {
-            SendLocation();
+            if (connection_->IsOpen()) {
+              SendLocation();
+            } else {
+              Reconnect();
+              SendSystemInfo();
+            }
             StartTimer();
           }
         });
@@ -119,6 +130,9 @@ class DeviceClient {
   ServerRequestFactory request_factory_;
   ServerCommandProcessor processor_;
   boost::asio::steady_timer timer_;
+  boost::asio::io_context& io_context_;
+  std::string host_;
+  std::string port_;
   DeviceLocation location_;
 };
 
