@@ -61,6 +61,8 @@ class IConnection : public IConnectionBase {
   virtual void Write(OutgoingDataPtr data, std::function<void()> callback) = 0;
   virtual void Read(boost::asio::mutable_buffer buffer,
                     std::function<void(boost::system::error_code, std::size_t)> callback) = 0;
+  virtual void Close() = 0;
+  virtual bool IsOpen() const = 0;
 };
 
 
@@ -145,6 +147,15 @@ class Connection : public IConnection, public std::enable_shared_from_this<Conne
         });
   }
 
+  void Close() override {
+    auto sthis = this->shared_from_this();
+    boost::asio::post(socket_.get_executor(), [this, sthis]() { socket_.close(); });
+  }
+
+  bool IsOpen() const override {
+    return socket_.is_open();
+  }
+
  protected:
   tcp::socket& socket() { return socket_; }
 
@@ -154,7 +165,7 @@ class Connection : public IConnection, public std::enable_shared_from_this<Conne
     boost::asio::async_read(
         socket_, boost::asio::buffer(incoming_header_.data(), incoming_header_.size()),
         [this, sthis](boost::system::error_code error, std::size_t /*length*/) {
-          if (!error) {
+          if (!CloseOnError(error)) {
             incoming_header_.Decode();
             sthis->ProcessRequest();
           }
@@ -171,7 +182,7 @@ class Connection : public IConnection, public std::enable_shared_from_this<Conne
     boost::asio::async_write(
         socket_, boost::asio::const_buffer(outgoing_header_.data(), outgoing_header_.size()),
         [sthis, reply](boost::system::error_code error, std::size_t /*length*/) {
-          if (!error) {
+          if (!sthis->CloseOnError(error)) {
             if (reply->GetPayloadSize() == 0) {
               sthis->CompleteReplySending();
             } else {
@@ -198,7 +209,7 @@ class Connection : public IConnection, public std::enable_shared_from_this<Conne
     send_queue_.front().first->ReadData(
         boost::asio::buffer(payload_buffer_.data(), payload_buffer_.size()),
         [this, sthis](boost::system::error_code error, std::size_t length) {
-          if (!error) {
+          if (!CloseOnError(error)) {
             payload_bytes_left_ -= length;
             sthis->WritePayloadBuffer(length);
           }
@@ -211,7 +222,7 @@ class Connection : public IConnection, public std::enable_shared_from_this<Conne
     boost::asio::async_write(
         socket_, boost::asio::const_buffer(payload_buffer_.data(), size),
         [this, sthis](boost::system::error_code error, std::size_t /*length*/) {
-          if (!error) {
+          if (!CloseOnError(error)) {
             if (payload_bytes_left_ == 0) {
               sthis->CompleteReplySending();
             } else {
@@ -232,6 +243,12 @@ class Connection : public IConnection, public std::enable_shared_from_this<Conne
           processor_->ProcessRequest(request, [sthis](OutgoingDataPtr reply) { sthis->Write(reply); });
           boost::asio::post(socket_.get_executor(), [sthis]() { sthis->ReadRequestHeader(); });
         });
+  }
+
+  bool CloseOnError(boost::system::error_code error) {
+    if (error)
+      Close();
+    return !!error;
   }
 
   tcp::socket socket_;

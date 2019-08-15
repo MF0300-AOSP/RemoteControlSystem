@@ -26,11 +26,6 @@ class ClientConnection : public Connection<IncomingHeader, OutgoingHeader> {
           }
         });
   }
-
-  void Close() {
-    auto sthis = std::static_pointer_cast<ClientConnection>(this->shared_from_this());
-    boost::asio::post(this->socket().get_executor(), [this, sthis]() { this->socket().close(); });
-  }
 };
 
 
