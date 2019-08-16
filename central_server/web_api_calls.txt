@@ -1,0 +1,9 @@
+curl -v -s http://localhost:8080/devices/statistic | json_pp
+curl -v -s http://localhost:8080/devices/list | json_pp 
+curl -v -s http://localhost:8080/devices/HT1103898215160341 | json_pp 
+curl -v -s -O -J http://localhost:8080/devices/HT1103898215160341/logs/logcat
+curl -v -s -O -J http://localhost:8080/devices/HT1103898215160341/logs/dmesg
+curl -v -s http://localhost:8080/devices/HT1103898215160341/restart
+curl -v -s http://localhost:8080/devices/HT1103898215160341/applist | json_pp 
+curl -v -s --data-binary @$HOME/Downloads/drammer.apk http://localhost:8080/devices/HT1103898215160341/appinstall
+curl -v -s -d "org.iseclab.drammer" http://localhost:8080/devices/HT1103898215160341/appuninstall
